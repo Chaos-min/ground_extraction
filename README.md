@@ -13,5 +13,6 @@ Please refer to this project to configure 'CSF' dependency:
 https://github.com/jianboqi/CSF
 
 #### results
-
-
+![](https://github.com/Chaos-min/ground_extraction/original.png)
+![](https://github.com/Chaos-min/ground_extraction/results.png)
+![](https://github.com/Chaos-min/ground_extraction/scale_domain.png)
