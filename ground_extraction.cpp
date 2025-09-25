@@ -2,98 +2,121 @@
 #include <vector>
 #include <cmath>
 #include <algorithm>
+#include <limits>
 #include <CSF.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/io/pcd_io.h>
 #include <pcl/common/time.h>
-#include <pcl/kdtree/kdtree_flann.h>
-#include <pcl/search/kdtree.h>
+#include <pcl/octree/octree_search.h>
 #include <boost/thread/thread.hpp>
 #include <pcl/visualization/pcl_visualizer.h>
+
 
 /*
 * Data: 2025.9.24
 * Authors: yekai
-* ¹¦ÄÜ£ºÍêÕûµÄÉ½µØµØĞÎµãÔÆÂË²¨Á÷³Ì
-* Á÷³Ì£º
-* 1. CSF²¼ÁÏÂË²¨Ëã·¨È¥³ı¸ßÖ²±»Óë½¨ÖşÎï
-* 2. VDVIÂÌÒ¶Ö¸ÊıÈ¥³ıµÍÖ²±»
-* 3. ×î½üÁÚ²åÖµÌî²¹¿Õ¶´(kdtree¼ìË÷½üÁÚÓò)
-* Êä³ö£º
-* 1. csf_groundPointCloud.pcd - CSFÂË²¨ºóµÄµØÃæµãÔÆ
-* 2. csf_nonGroundPointCloud.pcd - CSFÂË²¨ºóµÄ·ÇµØÃæµãÔÆ
-* 3. ground_without_vegetation.pcd - VDVIÈ¥³ıµÍÖ²±»ºóµÄµãÔÆ
-* 4. vegetation_points.pcd - Ö²±»µãÔÆ
-* 5. final_ground_points.pcd - ×îÖÕ²åÖµºóµÄÍêÕûµØÃæµãÔÆ
-* ²ÎÊı½âÊÍ¼û£º
-* Line 
 * 
+* ä»‹ç»ï¼šå¤æ‚å±±åœ°åœ°å½¢åœ°é¢ç‚¹æå–æ–¹æ³•å‚è€ƒ
+* æµç¨‹ï¼š
+* 1. CSFå¸ƒæ–™æ»¤æ³¢ç®—æ³•å»é™¤é«˜æ¤è¢«ä¸å»ºç­‘ç‰©
+* 2. VDVIç»¿å¶æŒ‡æ•°å»é™¤ä½æ¤è¢«
+* 3. æœ€è¿‘é‚»æ’å€¼å¡«è¡¥ç©ºæ´
+* è¾“å‡ºï¼š
+* 1. csf_groundPointCloud.pcd - CSFæ»¤æ³¢åçš„åœ°é¢ç‚¹äº‘
+* 2. csf_nonGroundPointCloud.pcd - CSFæ»¤æ³¢åçš„éåœ°é¢ç‚¹äº‘
+* 3. ground_without_vegetation.pcd - VDVIå»é™¤ä½æ¤è¢«åçš„ç‚¹äº‘
+* 4. vegetation_points.pcd - æ¤è¢«ç‚¹äº‘
+* 5. final_ground_points.pcd - æœ€ç»ˆæ’å€¼åçš„å®Œæ•´åœ°é¢ç‚¹äº‘
 * 
+* å‚æ•°è§£é‡Šè§ï¼š
+* Line 131-132
+* Line 191
+* Line 260-265
+* 
+* ä¾‹å­ï¼šåŸå§‹ç‚¹äº‘æ•°ä¸º16166028ï¼Œæ•ˆç‡ä¸º
+*     CSFï¼š8-10 minutes
+*     VDVIï¼š<3 s
+*     æœ€è¿‘é‚»æ’å€¼ï¼š14-18 minutes
+*
 */
-
 using namespace std;
 
 using PointT = pcl::PointXYZRGB;
 
-// ¹éÒ»»¯µ½0~255
+// å½’ä¸€åŒ–åˆ°0~255
 std::vector<int> Normallized255(std::vector<double>& gv)
 {
+    if (gv.empty()) return std::vector<int>();
+
     double Gmax = *max_element(gv.begin(), gv.end());
     double Gmin = *min_element(gv.begin(), gv.end());
+
+    if (Gmax == Gmin)
+    {
+        // æ‰€æœ‰å€¼ç›¸åŒçš„æƒ…å†µ
+        std::vector<int> GV(gv.size(), 128);
+        return GV;
+    }
+
     std::vector<int> GV(gv.size(), 0);
     for (size_t i = 0; i < gv.size(); ++i)
     {
-        GV[i] = 255 * (gv[i] - Gmin) / (Gmax - Gmin);
+        GV[i] = static_cast<int>(255 * (gv[i] - Gmin) / (Gmax - Gmin));
     }
     return GV;
 }
 
-// ×î´óÀà¼ä·½²î·¨»ñÈ¡Ç¿¶È·Ö¸îãĞÖµ
+// æœ€å¤§ç±»é—´æ–¹å·®æ³•è·å–å¼ºåº¦åˆ†å‰²é˜ˆå€¼
 int CalculateThresholdByOTSU(std::vector<int>& vdvi)
 {
-    // Ç¿¶ÈÖ±·½Í¼
-    int histogramIntensity[65536] = { 0 };
-    int maxIntensity = INT64_MIN, minIntensity = INT64_MAX;
-    int pcCount = vdvi.size();
+    if (vdvi.empty()) return 128;
+
+    // å¼ºåº¦ç›´æ–¹å›¾
+    std::vector<int> histogramIntensity(256, 0); // ä½¿ç”¨vectoré¿å…æ ˆæº¢å‡º
+    int maxIntensity = INT_MIN, minIntensity = INT_MAX;
+    int pcCount = static_cast<int>(vdvi.size());
 
     for (int i = 0; i < pcCount; ++i)
     {
         int vIntensity = vdvi[i];
+        if (vIntensity > 255) vIntensity = 255;
+        if (vIntensity < 0) vIntensity = 0;
+
         if (vIntensity > maxIntensity) maxIntensity = vIntensity;
         if (vIntensity < minIntensity) minIntensity = vIntensity;
         ++histogramIntensity[vIntensity];
     }
 
-    // ×ÜÖÊÁ¿¾Ø
+    // æ€»è´¨é‡çŸ©
     double sumIntensity = 0.0;
     for (int k = minIntensity; k <= maxIntensity; k++)
     {
-        sumIntensity += (double)k * (double)histogramIntensity[k];
+        sumIntensity += static_cast<double>(k) * static_cast<double>(histogramIntensity[k]);
     }
 
-    // ±éÀú¼ÆËã
-    int thrIntensity = 1;
-    double otsu = 1;
-    int w0 = 0; // Ç°¾°µãÊı
-    double sumFore = 0.0; // Ç°¾°ÖÊÁ¿¾Ø
+    // éå†è®¡ç®—
+    int thrIntensity = minIntensity;
+    double maxOtsu = -1.0;
+    int w0 = 0; // å‰æ™¯ç‚¹æ•°
+    double sumFore = 0.0; // å‰æ™¯è´¨é‡çŸ©
 
     for (int k = minIntensity; k <= maxIntensity; k++)
     {
         w0 += histogramIntensity[k];
-        int w1 = pcCount - w0; // ºó¾°µãÊı
+        int w1 = pcCount - w0; // åæ™¯ç‚¹æ•°
 
         if (w0 == 0) continue;
         if (w1 == 0) break;
 
-        sumFore += (double)k * histogramIntensity[k];
-        double u0 = sumFore / w0; // Ç°¾°Æ½¾ù»Ò¶È
-        double u1 = (sumIntensity - sumFore) / w1; // ±³¾°Æ½¾ù»Ò¶È
-        double g = (double)w0 * (double)w1 * (u0 - u1) * (u0 - u1); // Àà¼ä·½²î
+        sumFore += static_cast<double>(k) * histogramIntensity[k];
+        double u0 = sumFore / w0; // å‰æ™¯å¹³å‡ç°åº¦
+        double u1 = (sumIntensity - sumFore) / w1; // èƒŒæ™¯å¹³å‡ç°åº¦
+        double g = static_cast<double>(w0) * static_cast<double>(w1) * (u0 - u1) * (u0 - u1); // ç±»é—´æ–¹å·®
 
-        if (g > otsu)
+        if (g > maxOtsu)
         {
-            otsu = g;
+            maxOtsu = g;
             thrIntensity = k;
         }
     }
@@ -101,60 +124,82 @@ int CalculateThresholdByOTSU(std::vector<int>& vdvi)
     return thrIntensity;
 }
 
-// ×î½üÁÚ²åÖµÌî²¹¿Õ¶´
-pcl::PointCloud<PointT>::Ptr nearestNeighborInterpolation(
+// ä½¿ç”¨å…«å‰æ ‘è¿›è¡Œæœ€è¿‘é‚»æ’å€¼å¡«è¡¥ç©ºæ´
+pcl::PointCloud<PointT>::Ptr octreeNearestNeighborInterpolation(
     pcl::PointCloud<PointT>::Ptr inputCloud,
     pcl::PointCloud<PointT>::Ptr groundCloud,
-    double radius = 1.0, int maxNeighbors = 5)
+    double resolution = 1.0, // å…«å‰æ ‘åˆ†è¾¨ç‡
+    int maxNeighbors = 5) // æœ€å¤§é‚»åŸŸç‚¹æ•°
 {
     pcl::PointCloud<PointT>::Ptr resultCloud(new pcl::PointCloud<PointT>);
-    *resultCloud = *groundCloud; // ³õÊ¼»¯ÎªµØÃæµãÔÆ
+    *resultCloud = *groundCloud; // åˆå§‹åŒ–ä¸ºåœ°é¢ç‚¹äº‘
 
-    // ´´½¨KDÊ÷ÓÃÓÚ×î½üÁÚËÑË÷
-    pcl::search::KdTree<PointT>::Ptr tree(new pcl::search::KdTree<PointT>);
-    tree->setInputCloud(groundCloud);
+    if (groundCloud->empty())
+    {
+        cout << "è­¦å‘Šï¼šåœ°é¢ç‚¹äº‘ä¸ºç©ºï¼Œæ— æ³•è¿›è¡Œæ’å€¼" << endl;
+        return resultCloud;
+    }
 
-    // ÕÒ³ö±»ÎóÉ¾µÄµØÃæµã£¨ÔÚÊäÈëµãÔÆÖĞµ«²»ÔÚµ±Ç°µØÃæµãÔÆÖĞµÄµã£©
+    // åˆ›å»ºå…«å‰æ ‘
+    pcl::octree::OctreePointCloudSearch<PointT> octree(resolution);
+    octree.setInputCloud(groundCloud);
+    octree.addPointsFromInputCloud();
+
+    cout << "å…«å‰æ ‘æ„å»ºå®Œæˆï¼Œåˆ†è¾¨ç‡: " << resolution << endl;
+
+    // æ‰¾å‡ºè¢«è¯¯åˆ çš„åœ°é¢ç‚¹
     pcl::PointCloud<PointT>::Ptr missingPoints(new pcl::PointCloud<PointT>);
-
-    // ´´½¨µØÃæµãÔÆµÄKDÊ÷ÓÃÓÚ¿ìËÙ²éÕÒ
-    pcl::search::KdTree<PointT>::Ptr groundTree(new pcl::search::KdTree<PointT>);
-    groundTree->setInputCloud(groundCloud);
+    int missingCount = 0;
 
     for (size_t i = 0; i < inputCloud->size(); ++i)
     {
         PointT point = inputCloud->points[i];
-        std::vector<int> pointIdxNKNSearch(1);
-        std::vector<float> pointNKNSquaredDistance(1);
 
-        // ÔÚgroundCloudÖĞ²éÕÒ×î½üµã
-        if (groundTree->nearestKSearch(point, 1, pointIdxNKNSearch, pointNKNSquaredDistance) > 0)
+        // åœ¨å…«å‰æ ‘ä¸­æœç´¢æœ€è¿‘ç‚¹
+        std::vector<int> pointIdxVec;
+        std::vector<float> pointSquaredDistance;
+
+        if (octree.nearestKSearch(point, 1, pointIdxVec, pointSquaredDistance) > 0)
         {
-            // Èç¹û¾àÀë´óÓÚãĞÖµ£¬ÔòÈÏÎªÕâ¸öµã±»ÎóÉ¾ÁË
-            if (pointNKNSquaredDistance[0] > 0.1) // 10cmãĞÖµ
+            // å¦‚æœè·ç¦»å¤§äºé˜ˆå€¼ï¼Œåˆ™è®¤ä¸ºè¿™ä¸ªç‚¹è¢«è¯¯åˆ äº†
+            if (pointSquaredDistance[0] > 0.1) // 10cmé˜ˆå€¼
             {
                 missingPoints->push_back(point);
+                missingCount++;
             }
         }
     }
 
-    cout << "·¢ÏÖ " << missingPoints->size() << " ¸ö¿ÉÄÜ±»ÎóÉ¾µÄµã" << endl;
+    cout << "å‘ç° " << missingCount << " ä¸ªå¯èƒ½è¢«è¯¯åˆ çš„ç‚¹" << endl;
 
-    // ¶ÔÃ¿¸öÈ±Ê§µã½øĞĞ²åÖµ
+    if (missingPoints->empty())
+    {
+        cout << "æ²¡æœ‰å‘ç°éœ€è¦æ’å€¼çš„ç‚¹" << endl;
+        return resultCloud;
+    }
+
+    // å¯¹æ¯ä¸ªç¼ºå¤±ç‚¹è¿›è¡Œæ’å€¼
+    int interpolatedCount = 0;
+
     for (size_t i = 0; i < missingPoints->size(); ++i)
     {
         PointT point = missingPoints->points[i];
         std::vector<int> pointIdxRadiusSearch;
         std::vector<float> pointRadiusSquaredDistance;
 
-        // ÔÚgroundCloudÖĞËÑË÷°ë¾¶ÄÚµÄÁÚ¾Ó
-        if (tree->radiusSearch(point, radius, pointIdxRadiusSearch, pointRadiusSquaredDistance) > 0)
+        // åœ¨å…«å‰æ ‘ä¸­æœç´¢åŠå¾„å†…çš„é‚»å±…
+        double searchRadius = resolution * 2.0; // æœç´¢åŠå¾„ä¸ºåˆ†è¾¨ç‡çš„2å€
+
+        if (octree.radiusSearch(point, searchRadius, pointIdxRadiusSearch, pointRadiusSquaredDistance) > 0)
         {
-            // ¼ÆËãÁÚ¾ÓµãµÄÆ½¾ù¸ß³Ì
+            // è®¡ç®—é‚»å±…ç‚¹çš„å¹³å‡é«˜ç¨‹
             double avgZ = 0.0;
             int validNeighbors = 0;
 
-            for (size_t j = 0; j < pointIdxRadiusSearch.size() && j < (size_t)maxNeighbors; ++j)
+            // é™åˆ¶æœ€å¤§é‚»å±…æ•°
+            size_t neighborCount = min(pointIdxRadiusSearch.size(), static_cast<size_t>(maxNeighbors));
+
+            for (size_t j = 0; j < neighborCount; ++j)
             {
                 avgZ += groundCloud->points[pointIdxRadiusSearch[j]].z;
                 validNeighbors++;
@@ -164,40 +209,41 @@ pcl::PointCloud<PointT>::Ptr nearestNeighborInterpolation(
             {
                 avgZ /= validNeighbors;
 
-                // ´´½¨ĞÂµÄµã£¨Ê¹ÓÃÔ­Ê¼µãµÄXY×ø±ê£¬²åÖµµÃµ½Z×ø±ê£©
+                // åˆ›å»ºæ–°çš„ç‚¹ï¼ˆä½¿ç”¨åŸå§‹ç‚¹çš„XYåæ ‡ï¼Œæ’å€¼å¾—åˆ°Zåæ ‡ï¼‰
                 PointT newPoint;
                 newPoint.x = point.x;
                 newPoint.y = point.y;
-                newPoint.z = avgZ;
+                newPoint.z = static_cast<float>(avgZ);
                 newPoint.r = point.r;
                 newPoint.g = point.g;
                 newPoint.b = point.b;
 
                 resultCloud->push_back(newPoint);
+                interpolatedCount++;
             }
         }
     }
 
-    cout << "²åÖµÌî²¹ÁË " << resultCloud->size() - groundCloud->size() << " ¸öµã" << endl;
+    cout << "å…«å‰æ ‘æ’å€¼å¡«è¡¥äº† " << interpolatedCount << " ä¸ªç‚¹" << endl;
 
     return resultCloud;
 }
 
 int main()
 {
-    // ==================== ²½Öè1: CSF²¼ÁÏÂË²¨ ====================
-    cout << "=== ²½Öè1: CSF²¼ÁÏÂË²¨¿ªÊ¼ ===" << endl;
+    // ==================== æ­¥éª¤1: CSFå¸ƒæ–™æ»¤æ³¢ ====================
+    cout << "=== æ­¥éª¤1: CSFå¸ƒæ–™æ»¤æ³¢å¼€å§‹ ===" << endl;
 
-    // ¼ÓÔØÔ­Ê¼µãÔÆ
+    // åŠ è½½åŸå§‹ç‚¹äº‘
     pcl::PointCloud<PointT>::Ptr cloud(new pcl::PointCloud<PointT>);
     if (pcl::io::loadPCDFile<PointT>("C://Users//Lenovo//Desktop//LiDAR_data//lasdata//cloud9.pcd", *cloud) == -1)
     {
-        PCL_ERROR("Î´ÄÜ¶ÁÈ¡ÎÄ¼ş\n");
+        PCL_ERROR("æœªèƒ½è¯»å–æ–‡ä»¶\n");
         return -1;
     }
-    cout << "Ô­Ê¼µãÔÆµãÊı: " << cloud->size() << endl;
+    cout << "åŸå§‹ç‚¹äº‘ç‚¹æ•°: " << cloud->size() << endl;
 
-    // ×ª»»ÎªCSFÖ§³ÖµÄÊı¾İ
+    // è½¬æ¢ä¸ºCSFæ”¯æŒçš„æ•°æ®
     vector<csf::Point> CSFcloud(cloud->size());
     for (size_t i = 0; i < cloud->points.size(); ++i)
     {
@@ -210,52 +256,72 @@ int main()
     CSF csf;
     csf.setPointCloud(CSFcloud);
 
-    // ÉèÖÃCSF²ÎÊı
-    csf.params.bSloopSmooth = false;
-    csf.params.cloth_resolution = 0.1;
-    csf.params.rigidness = 3;
-    csf.params.time_step = 0.65;
-    csf.params.class_threshold = 0.05;
-    csf.params.interations = 600;
+    // è®¾ç½®CSFå‚æ•°ï¼ˆæ ¹æ®å±±åœ°åœ°å½¢è°ƒæ•´ï¼‰
+    csf.params.bSloopSmooth = false;     // æ˜¯å¦å¼€å¯å¹³æ»‘ï¼Œå±±åœ°æœ‰å¡åº¦å»ºè®®å…³é—­å¡åº¦å¹³æ»‘
+    csf.params.cloth_resolution = 0.1;   // å¸ƒæ–™ç½‘æ ¼åˆ†è¾¨ç‡ï¼Œå€¼è¶Šå°ç½‘æ ¼ç½‘æ ¼è¶Šå¯†é›†ï¼Œè®¡ç®—ç²¾åº¦é«˜è€—æ—¶é•¿
+    csf.params.rigidness = 2;            // å¸ƒæ–™åˆšåº¦ï¼Œå€¼è¶Šå¤§å¸ƒæ–™è¶Šç¡¬
+    csf.params.time_step = 0.65;         // æ—¶é—´æ­¥é•¿ï¼Œå½±å“æ¨¡æ‹Ÿçš„ç¨³å®šæ€§å’Œæ”¶æ•›é€Ÿåº¦ï¼Œå€¼è¶Šå°è¶Šç¨³å®š
+    csf.params.class_threshold = 0.08;    // åˆ†ç±»é˜ˆå€¼ï¼Œç”¨äºåŒºåˆ†åœ°é¢ç‚¹å’Œéåœ°é¢ç‚¹çš„è·ç¦»é˜ˆå€¼ï¼Œå€¼è¶Šå¤§åˆ†ç±»è¶Šä¸¥æ ¼
+    csf.params.interations = 600;        // æ¨¡æ‹Ÿçš„æœ€å¤§è¿­ä»£æ¬¡æ•°ï¼Œæ¨¡æ‹Ÿè¶Šç¨³å®šè€—æ—¶è¶Šé•¿
 
-    // Ö´ĞĞCSFÂË²¨
+    // æ‰§è¡ŒCSFæ»¤æ³¢
     pcl::Indices groundIndexes, offGroundIndexes;
     csf.do_filtering(groundIndexes, offGroundIndexes);
-    cout << "CSFËã·¨ÔËĞĞÊ±¼ä: " << time.getTimeSeconds() << "Ãë" << endl;
+    double csfTime = time.getTimeSeconds();
+    cout << "CSFç®—æ³•è¿è¡Œæ—¶é—´: " << csfTime << "ç§’" << endl;
 
-    // ÌáÈ¡µØÃæºÍ·ÇµØÃæµãÔÆ
+    // æå–åœ°é¢å’Œéåœ°é¢ç‚¹äº‘
     pcl::PointCloud<PointT>::Ptr groundCloud(new pcl::PointCloud<PointT>);
     pcl::PointCloud<PointT>::Ptr offGroundCloud(new pcl::PointCloud<PointT>);
     pcl::copyPointCloud(*cloud, groundIndexes, *groundCloud);
     pcl::copyPointCloud(*cloud, offGroundIndexes, *offGroundCloud);
 
-    cout << "CSFµØÃæµãÔÆµãÊı: " << groundCloud->size() << endl;
-    cout << "CSF·ÇµØÃæµãÔÆµãÊı: " << offGroundCloud->size() << endl;
+    cout << "CSFåœ°é¢ç‚¹äº‘ç‚¹æ•°: " << groundCloud->size() << endl;
+    cout << "CSFéåœ°é¢ç‚¹äº‘ç‚¹æ•°: " << offGroundCloud->size() << endl;
 
-    // ±£´æCSF½á¹û
+    // ä¿å­˜CSFç»“æœ
     pcl::io::savePCDFileBinary("csf_groundPointCloud.pcd", *groundCloud);
     pcl::io::savePCDFileBinary("csf_nonGroundPointCloud.pcd", *offGroundCloud);
 
-    // ==================== ²½Öè2: VDVIÈ¥³ıµÍÖ²±» ====================
-    cout << "\n=== ²½Öè2: VDVIÈ¥³ıµÍÖ²±»¿ªÊ¼ ===" << endl;
+    // ==================== æ­¥éª¤2: VDVIå»é™¤ä½æ¤è¢« ====================
+    cout << "\n=== æ­¥éª¤2: VDVIå»é™¤ä½æ¤è¢«å¼€å§‹ ===" << endl;
 
-    // ¼ÆËãVDVIÖ¸Êı
+    if (groundCloud->empty())
+    {
+        cout << "è­¦å‘Šï¼šCSFåœ°é¢ç‚¹äº‘ä¸ºç©ºï¼Œè·³è¿‡VDVIå¤„ç†" << endl;
+        return -1;
+    }
+
+    // è®¡ç®—VDVIæŒ‡æ•°
     std::vector<double> dVDVIS(groundCloud->size(), 0);
+    int validVDVICount = 0;
+
     for (size_t i = 0; i < groundCloud->points.size(); ++i)
     {
         int R = groundCloud->points[i].r;
         int G = groundCloud->points[i].g;
         int B = groundCloud->points[i].b;
-        double VDVI = (2 * G - R - B) * 1.0 / (2 * G + R + B);
-        if (VDVI >= 0) dVDVIS[i] = VDVI;
+
+        // é¿å…é™¤é›¶é”™è¯¯
+        if ((2 * G + R + B) == 0)
+        {
+            dVDVIS[i] = 0;
+            continue;
+        }
+
+        double VDVI = (2.0 * G - R - B) / (2.0 * G + R + B);
+        dVDVIS[i] = VDVI;
+        validVDVICount++;
     }
 
-    // ¹éÒ»»¯²¢¼ÆËããĞÖµ
+    cout << "æœ‰æ•ˆVDVIè®¡ç®—ç‚¹æ•°: " << validVDVICount << endl;
+
+    // å½’ä¸€åŒ–å¹¶è®¡ç®—é˜ˆå€¼
     auto GV = Normallized255(dVDVIS);
     auto threshold = CalculateThresholdByOTSU(GV);
-    cout << "VDVI×Ô¶¯¼ÆËããĞÖµ: " << threshold << endl;
+    cout << "VDVIè‡ªåŠ¨è®¡ç®—é˜ˆå€¼: " << threshold << endl;
 
-    // ¸ù¾İãĞÖµÌáÈ¡µãÔÆ
+    // æ ¹æ®é˜ˆå€¼æå–ç‚¹äº‘
     pcl::PointCloud<PointT>::Ptr vegetationCloud(new pcl::PointCloud<PointT>);
     pcl::PointCloud<PointT>::Ptr groundWithoutVegetation(new pcl::PointCloud<PointT>);
 
@@ -271,63 +337,69 @@ int main()
         }
     }
 
-    cout << "È¥³ıµÍÖ²±»ºóµØÃæµãÔÆµãÊı: " << groundWithoutVegetation->size() << endl;
-    cout << "Ö²±»µãÔÆµãÊı: " << vegetationCloud->size() << endl;
+    cout << "å»é™¤ä½æ¤è¢«ååœ°é¢ç‚¹äº‘ç‚¹æ•°: " << groundWithoutVegetation->size() << endl;
+    cout << "æ¤è¢«ç‚¹äº‘ç‚¹æ•°: " << vegetationCloud->size() << endl;
 
-    // ±£´æVDVI½á¹û
+    // ä¿å­˜VDVIç»“æœ
     pcl::io::savePCDFileBinary("ground_without_vegetation.pcd", *groundWithoutVegetation);
     pcl::io::savePCDFileBinary("vegetation_points.pcd", *vegetationCloud);
 
-    // ==================== ²½Öè3: ×î½üÁÚ²åÖµÌî²¹¿Õ¶´ ====================
-    cout << "\n=== ²½Öè3: ×î½üÁÚ²åÖµÌî²¹¿Õ¶´¿ªÊ¼ ===" << endl;
+    // ==================== æ­¥éª¤3: å…«å‰æ ‘æœ€è¿‘é‚»æ’å€¼å¡«è¡¥ç©ºæ´ ====================
+    cout << "\n=== æ­¥éª¤3: å…«å‰æ ‘æœ€è¿‘é‚»æ’å€¼å¡«è¡¥ç©ºæ´å¼€å§‹ ===" << endl;
 
-    pcl::PointCloud<PointT>::Ptr finalGroundCloud = nearestNeighborInterpolation(
-        groundCloud, groundWithoutVegetation, 1.0, 5);
+    pcl::PointCloud<PointT>::Ptr finalGroundCloud = octreeNearestNeighborInterpolation(
+        groundCloud, groundWithoutVegetation, 0.5, 5);
 
-    cout << "×îÖÕµØÃæµãÔÆµãÊı: " << finalGroundCloud->size() << endl;
+    cout << "æœ€ç»ˆåœ°é¢ç‚¹äº‘ç‚¹æ•°: " << finalGroundCloud->size() << endl;
 
-    // ±£´æ×îÖÕ½á¹û
+    // ä¿å­˜æœ€ç»ˆç»“æœ
     pcl::io::savePCDFileBinary("final_ground_points.pcd", *finalGroundCloud);
 
-    // ==================== ½á¹û¿ÉÊÓ»¯ ====================
-    cout << "\n=== ¿ªÊ¼¿ÉÊÓ»¯ ===" << endl;
+    // ==================== ç»“æœå¯è§†åŒ– ====================
+    cout << "\n=== å¼€å§‹å¯è§†åŒ– ===" << endl;
 
-    boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer(new pcl::visualization::PCLVisualizer("ÍêÕûÂË²¨Á÷³Ì½á¹û"));
-    viewer->setWindowName("É½µØµØĞÎµãÔÆÂË²¨Á÷³Ì");
+    boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer(new pcl::visualization::PCLVisualizer("å®Œæ•´æ»¤æ³¢æµç¨‹ç»“æœ"));
+    viewer->setWindowName("å±±åœ°åœ°å½¢ç‚¹äº‘æ»¤æ³¢æµç¨‹");
 
-    // ´´½¨ËÄ¸öÊÓ¿Ú
+    // åˆ›å»ºå››ä¸ªè§†å£
     int v1 = 0, v2 = 1, v3 = 2, v4 = 3;
-    viewer->createViewPort(0.0, 0.5, 0.5, 1.0, v1);    // ×óÉÏ£ºÔ­Ê¼µãÔÆ
-    viewer->createViewPort(0.5, 0.5, 1.0, 1.0, v2);    // ÓÒÉÏ£ºCSF½á¹û
-    viewer->createViewPort(0.0, 0.0, 0.5, 0.5, v3);    // ×óÏÂ£ºVDVI½á¹û
-    viewer->createViewPort(0.5, 0.0, 1.0, 0.5, v4);    // ÓÒÏÂ£º×îÖÕ½á¹û
+    viewer->createViewPort(0.0, 0.5, 0.5, 1.0, v1);    // å·¦ä¸Šï¼šåŸå§‹ç‚¹äº‘
+    viewer->createViewPort(0.5, 0.5, 1.0, 1.0, v2);    // å³ä¸Šï¼šCSFç»“æœ
+    viewer->createViewPort(0.0, 0.0, 0.5, 0.5, v3);    // å·¦ä¸‹ï¼šVDVIç»“æœ
+    viewer->createViewPort(0.5, 0.0, 1.0, 0.5, v4);    // å³ä¸‹ï¼šæœ€ç»ˆç»“æœ
 
-    // ÊÓ¿Ú1: Ô­Ê¼µãÔÆ
+    // è§†å£1: åŸå§‹ç‚¹äº‘
     pcl::visualization::PointCloudColorHandlerRGBField<PointT> rgb_original(cloud);
     viewer->addPointCloud<PointT>(cloud, rgb_original, "original", v1);
-    viewer->addText("Ô­Ê¼µãÔÆ", 10, 10, "v1_text", v1);
+    viewer->addText("åŸå§‹ç‚¹äº‘", 10, 10, "v1_text", v1);
 
-    // ÊÓ¿Ú2: CSF½á¹û£¨µØÃæºìÉ«£¬·ÇµØÃæÂÌÉ«£©
+    // è§†å£2: CSFç»“æœï¼ˆåœ°é¢çº¢è‰²ï¼Œéåœ°é¢ç»¿è‰²ï¼‰
     pcl::visualization::PointCloudColorHandlerCustom<PointT> ground_color(groundCloud, 255, 0, 0);
     pcl::visualization::PointCloudColorHandlerCustom<PointT> offground_color(offGroundCloud, 0, 255, 0);
     viewer->addPointCloud(groundCloud, ground_color, "csf_ground", v2);
     viewer->addPointCloud(offGroundCloud, offground_color, "csf_offground", v2);
-    viewer->addText("CSFÂË²¨½á¹û", 10, 10, "v2_text", v2);
+    viewer->addText("CSFæ»¤æ³¢ç»“æœ", 10, 10, "v2_text", v2);
 
-    // ÊÓ¿Ú3: VDVI½á¹û£¨·ÇÖ²±»µãÔÆ£©
+    // è§†å£3: VDVIç»“æœï¼ˆéæ¤è¢«ç‚¹äº‘ï¼‰
     pcl::visualization::PointCloudColorHandlerRGBField<PointT> rgb_ground(groundWithoutVegetation);
     viewer->addPointCloud(groundWithoutVegetation, rgb_ground, "vdvi_result", v3);
-    viewer->addText("VDVIÈ¥³ıµÍÖ²±»", 10, 10, "v3_text", v3);
+    viewer->addText("VDVIå»é™¤ä½æ¤è¢«", 10, 10, "v3_text", v3);
 
-    // ÊÓ¿Ú4: ×îÖÕ½á¹û
+    // è§†å£4: æœ€ç»ˆç»“æœ
     pcl::visualization::PointCloudColorHandlerCustom<PointT> final_color(finalGroundCloud, 0, 0, 255);
     viewer->addPointCloud(finalGroundCloud, final_color, "final_result", v4);
-    viewer->addText("×îÖÕµØÃæµãÔÆ", 10, 10, "v4_text", v4);
+    viewer->addText("æœ€ç»ˆåœ°é¢ç‚¹äº‘", 10, 10, "v4_text", v4);
 
     viewer->addCoordinateSystem(1.0);
     viewer->initCameraParameters();
 
-    cout << "¿ÉÊÓ»¯´°¿ÚÒÑ´ò¿ª£¬°´qÍË³ö..." << endl;
+    // è®¾ç½®èƒŒæ™¯è‰²
+    viewer->setBackgroundColor(0.05, 0.05, 0.05, v1);
+    viewer->setBackgroundColor(0.05, 0.05, 0.05, v2);
+    viewer->setBackgroundColor(0.05, 0.05, 0.05, v3);
+    viewer->setBackgroundColor(0.05, 0.05, 0.05, v4);
+
+    cout << "å¯è§†åŒ–çª—å£å·²æ‰“å¼€ï¼ŒæŒ‰qé€€å‡º..." << endl;
 
     while (!viewer->wasStopped())
     {
@@ -335,5 +407,14 @@ int main()
         boost::this_thread::sleep(boost::posix_time::microseconds(100000));
     }
 
+    cout << "ç¨‹åºæ‰§è¡Œå®Œæˆï¼" << endl;
+    cout << "è¾“å‡ºæ–‡ä»¶ï¼š" << endl;
+    cout << "1. csf_groundPointCloud.pcd - CSFæ»¤æ³¢åœ°é¢ç‚¹" << endl;
+    cout << "2. csf_nonGroundPointCloud.pcd - CSFæ»¤æ³¢éåœ°é¢ç‚¹" << endl;
+    cout << "3. ground_without_vegetation.pcd - VDVIå»é™¤æ¤è¢«ååœ°é¢ç‚¹" << endl;
+    cout << "4. vegetation_points.pcd - æ¤è¢«ç‚¹" << endl;
+    cout << "5. final_ground_points.pcd - æœ€ç»ˆæ’å€¼ååœ°é¢ç‚¹" << endl;
+
     return 0;
 }
+
