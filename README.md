@@ -8,11 +8,9 @@ This code can solve the problem of extracting ground point clouds from complex m
 
 ### Usage
 #### requirement
-we test on the VS2022, PCL 1.14.0, CMake 4.1.1, and 'CSF' .
+We test on the VS2022, PCL 1.14.0, CMake 4.1.1, and 'CSF'.
 Please refer to this project to configure 'CSF' dependency:
 https://github.com/jianboqi/CSF
 
-#### results
-![](https://github.com/Chaos-min/ground_extraction/original.png)
-![](https://github.com/Chaos-min/ground_extraction/results.png)
-![](https://github.com/Chaos-min/ground_extraction/scale_domain.png)
+#### run
+Create a C++ project to include the project 'ground _ extraction.cpp'.
